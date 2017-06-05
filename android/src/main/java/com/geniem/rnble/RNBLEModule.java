@@ -82,7 +82,7 @@ class RNBLEModule extends ReactContextBaseJavaModule implements LifecycleEventLi
 
     // enable disconnect on pause
     // TODO: make this configurable on the javascript side
-    private static final boolean DISCONNECT_ON_PAUSE = true;
+    private static final boolean DISCONNECT_ON_PAUSE = false;
 
     private Context context;
 
