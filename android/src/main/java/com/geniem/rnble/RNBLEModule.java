@@ -30,8 +30,10 @@ package com.geniem.rnble;
 import android.content.Context;
 import android.os.Handler;
 import android.util.Log;
+import android.os.SystemClock;
 
-import java.util.concurrent.BlockingQueue;  
+
+import java.util.concurrent.BlockingQueue;
 
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
@@ -109,11 +111,11 @@ class RNBLEModule extends ReactContextBaseJavaModule implements LifecycleEventLi
         super(reactContext);
         this.context = reactContext;
         reactContext.addLifecycleEventListener(this);
-    } 
+    }
 
     private ReadWriteOperation currentOperation;
 
-    /** 
+    /**
      * Start read / write thread for sending characteristic operations
     */
     private void startReadWriteThread() {
@@ -125,6 +127,7 @@ class RNBLEModule extends ReactContextBaseJavaModule implements LifecycleEventLi
             public void run() {
                 while (true) {
                     try {
+                        Log.d(TAG, "processing new command from queue");
                         currentOperation = readWriteOperationQueue.take();
                         responseReceived = false;
                         currentOperation.handle(bluetoothGatt);
@@ -145,15 +148,16 @@ class RNBLEModule extends ReactContextBaseJavaModule implements LifecycleEventLi
     }
 
     /**
-     * Block read/write thread until we receive go-ahead 
+     * Block read/write thread until we receive go-ahead
      * by receiving the callback from either onCharacteristicRead or onCharacteristicWrite.
-     * 
+     *
      * This is a polling operation that happens every SLEEP_MS milliseconds on the r/w thread
      */
     private void blockUntilResponseReceived() throws InterruptedException, NullPointerException {
         while (!responseReceived) {
             int timeoutCounter = currentOperation.incrementTimeout();
             if (timeoutCounter * SLEEP_MS > TIMEOUT_MS) {
+                Log.d(TAG, "blockUntilResponseReceived timeout");
                 return;
             }
             Thread.sleep(SLEEP_MS);
@@ -164,7 +168,7 @@ class RNBLEModule extends ReactContextBaseJavaModule implements LifecycleEventLi
     private boolean responseReceived = false;
 
     /**
-     * Stop read/write thread 
+     * Stop read/write thread
      */
     private void stopReadWriteThread() {
         try {
@@ -252,11 +256,11 @@ class RNBLEModule extends ReactContextBaseJavaModule implements LifecycleEventLi
         stopReadWriteThread();
 
         if (bluetoothGatt == null) {
-            Log.w(TAG, "BluetoothGAtt not initialized");
+            Log.w(TAG, "Bluetoothgatt already closed");
 
             WritableMap error = Arguments.createMap();
             error.putInt("erroCode", -1);
-            error.putString("errorMessage", "BluetoothGatt not initialized.");
+            error.putString("errorMessage", "BluetoothGatt closed.");
             params.putMap("error", error);
 
         } else {
@@ -312,11 +316,6 @@ class RNBLEModule extends ReactContextBaseJavaModule implements LifecycleEventLi
             return;
         }
 
-        // We want to directly connect to the device, so we are setting the autoConnect
-        // parameter to false.
-        if (bluetoothGatt != null) {
-            bluetoothGatt.close();
-        }
         bluetoothGatt = device.connectGatt(context, false, gattCallback);
         Log.d(TAG, "Trying to create a new connection.");
         bluetoothDeviceAddress = peripheralUuid;
@@ -582,8 +581,6 @@ class RNBLEModule extends ReactContextBaseJavaModule implements LifecycleEventLi
         }
         if (DISCONNECT_ON_PAUSE && bluetoothGatt != null) {
             bluetoothGatt.disconnect();
-            bluetoothGatt.close();
-            bluetoothGatt = null;
             connectionState = STATE_DISCONNECTED;
         }
     }
@@ -598,8 +595,6 @@ class RNBLEModule extends ReactContextBaseJavaModule implements LifecycleEventLi
 
         if (bluetoothGatt != null) {
             bluetoothGatt.disconnect();
-            bluetoothGatt.close();
-            bluetoothGatt = null;
             connectionState = STATE_DISCONNECTED;
         }
     }
@@ -651,6 +646,14 @@ class RNBLEModule extends ReactContextBaseJavaModule implements LifecycleEventLi
             this.rnbleModule = rnbleModule;
         }
 
+        private synchronized void closeGatt() {
+          if(bluetoothGatt != null) {
+            bluetoothGatt.close();
+            bluetoothGatt = null;
+          }
+          Log.d(TAG, "Closed GATT server.");
+        }
+
         @Override
         public void onConnectionStateChange(BluetoothGatt gatt, int status, int newState) {
             BluetoothDevice remoteDevice = gatt.getDevice();
@@ -658,25 +661,23 @@ class RNBLEModule extends ReactContextBaseJavaModule implements LifecycleEventLi
             WritableMap params = Arguments.createMap();
             params.putString("peripheralUuid", remoteAddress); //remote address used here instead of uuid, not converted to noble format
 
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
-                Log.i(TAG, "Connected to GATT server. Discovering services.");
+            if (bluetoothGatt != null && newState == BluetoothProfile.STATE_CONNECTED) {
+                Log.d(TAG, "Connected to GATT server. Discovering services.");
                 connectionState = STATE_CONNECTED;
                 // Attempts to discover services after successful connection.
                 bluetoothGatt.discoverServices();
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 connectionState = STATE_DISCONNECTED;
-                if (bluetoothGatt != null) {
-                    bluetoothGatt.close();
-                    bluetoothGatt = null;
-                }
-                Log.i(TAG, "Disconnected from GATT server.");
+                SystemClock.sleep(100);
+                this.closeGatt();
+                Log.d(TAG, "GATT server closed. Sending event to the client.");
                 rnbleModule.sendEvent("ble.disconnect", params);
             }
         }
 
         @Override
         public void onServicesDiscovered(BluetoothGatt gatt, int status) {
-            Log.i(TAG, "onServicesDiscovered");
+            Log.d(TAG, "onServicesDiscovered");
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 rnbleModule.discoveredServices = bluetoothGatt.getServices();
             } else {
@@ -697,7 +698,7 @@ class RNBLEModule extends ReactContextBaseJavaModule implements LifecycleEventLi
         public void onCharacteristicRead(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic, int status) {
             Log.d(TAG, "characteristic onRead");
             responseReceived = true;
-            byte[] characteristicValue = null;
+            byte[] characteristicValue =  new byte[0];
             Boolean notification = false;
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 characteristicValue = characteristic.getValue();
